@@ -3,7 +3,7 @@ The Alkabot is an open-source alkalinity monitor for reef aquaria, designed to b
 <P><b>Parts:</b></P>
 <p>Both the main casing and the reagent reservoir are designed to be assembled from laser-cut 4mm acrylic. The part files for these (in .dxf format) can be found in the /laser directory.</p>
 
-<P>The pump components, mounting brackets, reaction chamber, and other mechanical parts are designed to be 3D printed. I suggest using PETG filament. None of the parts require supports, and they can be printed with 20-40% infill, except for the reaction chamber; this should be slightly overextruded and printed at 100% infill to guarantee watertightness. These part files (in .stl format) can be found in the /3Dprint directory.</p>
+<P>The pump components, mounting brackets, reaction chamber, and other mechanical parts are designed to be 3D printed. These part files (in .stl format) can be found in the /3Dprint directory.</p>
 
 <P>A full .step file for the assembly and all parts is also available in the /step directory, in case you wish to make any modifications to the design.</p>
 
