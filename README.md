@@ -13,7 +13,7 @@ The Alkabot is an open-source alkalinity monitor for reef aquaria, designed to b
 <p>I am planning to offer packages for sale containing all user-manufacturable parts. Details will be added with the next version release.</p>
 
 <p><b>Tools and supplies:</b></p>
-<p>Once you have all the parts, you shouldn't need more than a screwdriver and a soldering iron to complete the assembly. You'll also need graduated cylinders (ideally 10ml and 25/50ml) to calibrate your pumps.</p>
+<p>Once you have all the parts, you shouldn't need more than a screwdriver, a small hex key, and a soldering iron to complete the assembly. You'll also need graduated cylinders (ideally 10ml and 25/50ml) to calibrate your pumps.</p>
 
 <p><b>Software:</b></p>
 <p>The software to run the monitor as well as that needed to test and calibrate the pumps before operation can be found under /code.</p>
