@@ -1,5 +1,8 @@
 # alkabot
-The Alkabot is an open-source alkalinity monitor for reef aquaria, designed to be as accurate as possible using widely available electronics and 3D-printed hardware. It is significantly cheaper than commercially available alkalinity monitoring solutions, costing well under $200 (depending on part sourcing).
+
+<img src="images/alkabot_assembly.png" height=360/>
+
+The Alkabot is an open-source alkalinity monitor for reef aquaria, designed for maximum accuracy using widely available electronics and 3D-printed hardware. It is significantly cheaper than commercially available alkalinity monitoring solutions, costing well under $200 (depending on part sourcing).
 <P><b>Parts:</b></P>
 <p>Both the main casing and the reagent reservoir are designed to be assembled from laser-cut 4mm acrylic. The part files for these (in .dxf format) can be found in the /laser directory.</p>
 
