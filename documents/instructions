@@ -35,7 +35,7 @@ Place the CNC shield, 5V regulator, EZO board assembly, and DC motor driver on t
 Step 8: Wiring
 From the 5V regulator, the input voltage wire goes to one of the Mot_VCC pins you soldered onto the shield, the ground goes to any free GND pin on the shield, and the output wire goes to any 5V pin. This gives the shield a functional 5V rail for powering other components.
 Use five long female-female jumper wires for the pH board. Connect them to the CNC shield as follows: RX to Z+, TX to D12, OFF to Y+, GND to GND, VCC to 5V. Note: with Z+, Y+, and D12, you'll need to use the INNER pins as the outer ones are all grounds.
-Use five female-female jumper wires to connect the DC motor driver to the CNC shield. Connect them as follows: VM+ to your second Mot_VCC pin, Vcc to 5V, GND to GND, PWMB to CoolEN, and BIN1 to Resume. Note: for CoolEN and Resume, use the INNER pins.
+Use seven female-female jumper wires to connect the DC motor driver to the CNC shield. Connect them as follows: VM+ to your second Mot_VCC pin, Vcc to 5V, GND to GND, PWMB to CoolEN, BIN1 to Resume, PWMA to X+, and AIN1 to D13. Note: for CoolEN and Resume, use the INNER pins.
 Connect the two wires you soldered to the 24mm motor to the two MOTORB pins on the DC driver board; it doesn't matter which way around they go.
 Do not connect the stepper motors yet.
 
@@ -54,24 +54,27 @@ Step 10: Assembling the motors
 Assemble the bearings first. Use a soldering iron to push threaded inserts into the bottom bearing plates: three M3 x 5 x 4 inserts into the holes facing the flat side, and one M3 x 5 x 6 into the long hole that starts on the outer edge. Place three steel dowels in the holes on this plate and slide three roller bearings onto them. Clip the top bearing plate onto these and three M3 x 16 screws to fix these to the threaded inserts on the bottom plate. Screw a grub screw into the side of the bearing, just until it is flush with the outer perimeter. Repeat this process for each of the three bearing assemblies.
 Use M3 x 12 screws to attach one motor plate and stepper motor to opposite sides of the front panel in the bottom position. Position the motor plate so that the small hole in the middle of one side is at the top. Slide one of the bearing assemblies onto the motor shaft. Line the grub screw up with the hole in the top of the motor plate, and use a hex key inserted through the hole to tighten the grub screw onto the motor shaft. Make sure the bearing assembly does not come off the motor shaft if pulled with moderate force. Do the middle motor next, followed by the top one.
 
-Step 11: Fixing the front plate
+Step 11: Cooling fan
+This is optional, but recommended. Any cheap 12V 40mm fan will do; cut any special connector it might have off the end and solder on some female jumper wire ends. Attach the fan to the inside or the outside of the front plate (outside gives more room for wires inside the case, but some may consider it the less aesthetically valid option...) using M3 screws and nuts. Run the wires through the hole below and to the left of the fan mount point if you're attaching it on the outside. Plug them into the DC driver board's MOTOR A ports, with the positive lead on the RIGHT (towards the corner).
+
+Step 12: Fixing the front plate
 Take your three pieces of silicone tubing coming off the reaction chamber and push the far ends through the corresponding holes on the front panel. Pull them through until about 10cm of each tube remains on the inside. Connect the stepper motors to the CNC shield – the top motor to Z, the middle one to Y, and the lower one to X. Now you can place the front panel on the casing and screw in the six screws that attach it to the front panel mounts.
 
-Step 12: Tubing
+Step 13: Tubing
 Now that the front plate is fixed in place, take your thin reagent tubing and lay it across the top pump head, arced over the bearing assembly. Place a pump_case_top.stl on top of it and clamp this down by threading zipties through the holes down the sides and tightening them as far as you can. YES, ZIPTIES. I have tried using screws to hold this in, and the accuracy is better with zipties.
 
-Step 13: Motor calibration
+Step 14: Motor calibration
 Assembly is now finished! Insert a micro-USB cable into the Arduino through the hole in the top of the casing, and connect it to your computer. Upload the pump_calibration.ino code and follow the instructions to determine direction and rotations/millilitre constants for the stepper motors and speed settings for the stirrer motor.
 
-Step 14: Programming
+Step 15: Programming
 Open up the KH_monitor.ino code. Enter the constants determined in the motor calibration step and your wifi and MQTT details.
 You'll need to have a working MQTT server and understand the basics of using MQTT for this bit. There are plenty of tutorials on setting up MQTT on the internet if this is new to you. I use Mosquitto and Node-Red on a Raspberry Pi 4 to run my home automation.
 By default, the Alkabot will run a test when it receives a "1" on the topic KHmonitor/start, and will publish the result of the test to KHmonitor/data when it completes the test. You can, of course, change these topics.
 
-Step 15: Preparing reagent
+Step 16: Preparing reagent
 There is a tradeoff between accuracy, frequency of testing, and duration of "hands-off" use for the Alkabot. The highest accuracy is obtained by using weak acid. Tests using 0.01 M hydrochloric acid, for example, will be accurate to within +/- 0.2 dKH. However, each test may use up to 10ml of acid at this strength, meaning the reservoir will only hold enough reagent for about 20 tests. 0.05M HCl will produce an accuracy of +/- 0.6 dKH, which is sufficient to warn of significant swings in a home aquarium but may not be useful for other purposes. However, at this concentration the reservoir will hold enough reagent for 100 tests. I use 0.02 M acid (obtained by buying 1.0 M acid and diluting it 1 part per 50 in RODI water) and run tests every two days, and find a full reservoir lasts about two months.
 Whatever reagent concentration you choose, you should change the REAGENT_MOLARITY constant in the KH_monitor.ino code to match.
 
-Step 16: Testing
+Step 17: Testing
 You can now upload your code and test the Alkabot using a sample of water from your tank. It is best to have the tubing length and the relative heights of the Alkabot and the water sample as close as possible to what the conditions will be in use. Testing while keeping the device connected to your computer with a serial monitor window open will allow you to keep tabs on the process and identify any problem points.
 Note that apart from the signal to start a test, there are two debugging signals you can send to the Alkabot over MQTT: sending a "0" to KHmonitor/start (or your custom MQTT topic) will purge the reaction chamber, and sending a "2" will take a pH reading and print it to the serial monitor.
