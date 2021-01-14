@@ -28,7 +28,7 @@ The Alkabot is an open-source alkalinity monitor for reef aquaria, designed for 
 <p><b>Donations:</b></p>
 <p>You are free to use this design for any purpose covered by the Creative Commons Attribution-NonCommercial-ShareAlike license at no cost. However, if you'd like to contribute to the cost of ongoing development, you can donate via the PayPal button below. 50% of any profit I make from this project will be donated to marine conservation charities.</p>
 
-<a href="https://www.paypal.com/donate?business=EAHE9VLZCMH2Y&currency_code=CAD"><img src="https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif" border="0" name="submit" title="PayPal - The safer, easier way to pay online!" alt="Donate with PayPal button" /></a>
+<a href="https://www.paypal.com/donate?business=EAHE9VLZCMH2Y"><img src="https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif" border="0" name="submit" title="PayPal - The safer, easier way to pay online!" alt="Donate with PayPal button" /></a>
 
 <p><b>Attribution:</b></p>
 <p>The pump design is based on the work of the iGEN-Aachen team, available under a Creative Commons Attribution license from https://www.thingiverse.com/thing:2619479.</p>
