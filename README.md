@@ -28,6 +28,8 @@ The Alkabot is an open-source alkalinity monitor for reef aquaria, designed for 
 <p><b>Attribution:</b></p>
 <p>The pump design is based on the work of the iGEN-Aachen team, available under a Creative Commons Attribution license from https://www.thingiverse.com/thing:2619479.</p>
 
-<p><b>Version notes:</b></p>
-<p>Version 0.9 (published week of 11 January 2021):</p>
+<p><b>Version history:</b></p>
+<p>Version 0.9.1 (14 January 2021):</p>
+<ul><li>Added a 40mm fan mount and ventilation holes to the case parts.</li></ul>
+<p>Version 0.9 (11 January 2021):</p>
 <ul><li>First public release</li></ul>
