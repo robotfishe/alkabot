@@ -28,6 +28,9 @@ The Alkabot is an open-source alkalinity monitor for reef aquaria, designed for 
 <p><b>Assembly instructions:</b></p>
 <p>See the instructions file under /documents.</p>
 
+<p><b>Warnings:</b></p>
+<p>This project involves using hydrochloric acid, and while the concentrations you'll be using in the Alkabot itself aren't strong enough to harm you, if you buy more concentrated acid and dilute it at home <b>you need to wear appropriate protective gear and take reasonable precautions</b>.</p>
+
 <p><b>Donations:</b></p>
 <p>You are free to use this design for any purpose covered by the Creative Commons Attribution-NonCommercial-ShareAlike license at no cost. However, if you'd like to contribute to the cost of ongoing development, you can donate via the PayPal and Ko-Fi buttons below. 50% of any profit I make from this project will be donated to marine conservation charities.</p>
 
