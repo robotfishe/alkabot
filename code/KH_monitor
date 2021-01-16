@@ -1,0 +1,569 @@
+//Alkabot monitor code version 0.9.1
+//created by Julian Burton
+//repository at github.com/robotfishe/alkalinity
+//open source under Creative Commons Attribution-NonCommercial-ShareAlike
+
+#include <Arduino.h>
+#include "wiring_private.h"
+#include "BasicStepperDriver.h"
+#include <PubSubClient.h>
+#include <WiFiNINA.h>
+
+//set stepper motor constants
+#define MOTOR_STEPS 200
+#define TANK_RPM 180
+#define WASTE_RPM TANK_RPM
+#define REAGENT_RPM 80
+#define MICROSTEPS 8
+
+//set stepper motor wiring
+#define DIR_TANK 5
+#define STEP_TANK 2
+#define DIR_REAGENT 7
+#define STEP_REAGENT 4
+#define DIR_WASTE 6
+#define STEP_WASTE 3
+#define SLEEP 8
+
+//set DC and fan motor wiring
+#define STIR_EN A2
+#define STIR_PWM A3
+#define FAN_EN 13
+#define FAN_PWM 9
+#define FAN_SPEED 255
+
+//set DC motor PWM values
+#define STIR_START 4
+#define STIR_END 18
+#define STIR_STEP 2
+
+//set pH probe wiring
+#define PH_RX 12
+#define PH_TX 11
+#define PH_EN 10
+
+//set pump speeds - YOU WILL NEED TO CALIBRATE THIS TO YOUR SETUP
+#define TANK_ROT_ML 12.1
+#define REAGENT_ROT_ML 48.8
+#define WASTE_ROT_ML TANK_ROT_ML
+
+//set pump directions - YOU MAY NEED TO CHANGE THESE, they can be eiter  1 or -1
+#define REAGENT_DIRECTION -1
+#define TANK_DIRECTION -1
+#define WASTE_DIRECTION 1
+
+//set amount of water to test and amount to remove after test completes - note there's no issue if waste_ml is more than needed, only if it's less
+#define TANK_ML 30.0
+#define WASTE_ML 60.0
+
+//amount in ml to prime tank tubing, if it fills with air between runs
+#define TANK_PRIME 1.0
+
+//amount in ml to prime reagent tubing
+#define REAGENT_PRIME 0.3
+
+//amount in ml to purge backwards from reagent tubing, to prevent gravity feed effect - this should be roughly the same as REAGENT_PRIME
+#define REAGENT_PURGE 0.3
+
+//set amount of acid to add before each pH test
+#define REAGENT_ML 0.1
+
+//this sets how much faster the reagent will be added in the first and second phases of the test, until pH reaches 7.5 and 5.5 respectively
+#define REAGENT_FAST_MULTIPLIER 3.0
+#define REAGENT_MEDIUM_MULTIPLIER 2.0
+
+//normality of your acid reagent - CHANGE THIS FOR YOUR CHOSEN REAGENT
+#define REAGENT_NORMALITY 0.02
+
+//set to 1 to pull in fresh tank water after completing a test to keep the probe wet. if set to 0 it will be rinsed and then the chamber emptied
+#define KEEP_WET 1
+
+//this is the constant that relates molarity and amount of acid added to a result in dKH - only change this if you are using a type of acid other than HCl and have done your homework!
+#define KH_CONSTANT 93.318402
+
+//wifi and mqtt details - CHANGE FOR YOUR SETUP
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_CODE";
+IPAddress mqttServer(192,168,1,XX);
+const int mqttPort = 1883;
+const char* subTopic = "KHmonitor/start";
+const char* pubTopic = "KHmonitor/data";
+
+//set up wifi and MQTT
+WiFiClient wifiClient;
+PubSubClient client(wifiClient);
+long lastMsg = 0;
+char msg[50];
+
+//set up steppers
+BasicStepperDriver tank(MOTOR_STEPS, DIR_TANK, STEP_TANK, SLEEP);
+BasicStepperDriver reagent(MOTOR_STEPS, DIR_REAGENT, STEP_REAGENT);
+BasicStepperDriver waste(MOTOR_STEPS, DIR_WASTE, STEP_WASTE);
+
+//set up pH serial
+Uart mySerial (&sercom1, PH_RX, PH_TX, SERCOM_RX_PAD_3, UART_TX_PAD_0);
+
+//attach interrupt handler to SERCOM serial
+void SERCOM1_Handler(){
+  mySerial.IrqHandler();
+}
+
+void setup() {
+
+  // Reassign pins to SERCOM alt
+  pinPeripheral(12, PIO_SERCOM);
+  pinPeripheral(11, PIO_SERCOM);
+  
+  pinMode(STIR_EN, OUTPUT);
+  digitalWrite(STIR_EN, LOW);
+  pinMode(STIR_PWM, OUTPUT);
+
+  pinMode(FAN_EN, OUTPUT);
+  digitalWrite(FAN_EN, LOW);
+  pinMode(FAN_PWM,OUTPUT);
+
+  pinMode(PH_EN,OUTPUT);
+  digitalWrite(PH_EN,HIGH);
+  
+  Serial.begin(9600);
+  mySerial.begin(9600);
+
+
+  //put pH sensor non-continuous, disable response codes, then put to sleep
+  mySerial.print("C,0");
+  mySerial.print('\r');
+  delay(1000);
+  mySerial.print("RESPONSE,0");
+  mySerial.print('\r');
+  delay(1000);
+  mySerial.print("SLEEP");
+  mySerial.print('\r');
+  
+
+  setup_wifi();
+
+  client.setServer(mqttServer,mqttPort);
+  client.setCallback(callback);
+  
+  //initialise all steppers
+  tank.begin(TANK_RPM, MICROSTEPS);
+  reagent.begin(REAGENT_RPM, MICROSTEPS);
+  waste.begin(WASTE_RPM, MICROSTEPS);
+  
+  //set up active state on tank - enable pin is common to all steppers so this only needs to be done for one "master" stepper in the code
+  tank.setEnableActiveState(LOW);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+}
+
+void run_test() {
+
+  Serial.println("running test.");
+  
+  String sensorstring = "";
+  bool sensorstring_complete = false;
+  float reagent_used = 0;
+  float pH = 0;
+  float KH = 0;
+  float oldpH;
+
+  //cooling fan on
+  digitalWrite(FAN_EN,HIGH);
+  analogWrite(FAN_PWM,FAN_SPEED);
+
+  //if KEEP_WET is 1, drain reaction chamber
+  tank.enable();
+  waste.rotate(360*WASTE_DIRECTION*WASTE_ML*WASTE_ROT_ML*KEEP_WET);
+  tank.disable();
+
+  //rinse reaction chamber
+  Serial.println("rinsing");
+  tank.enable();
+  tank.rotate(360*TANK_DIRECTION*TANK_ML*TANK_ROT_ML);
+  tank.disable();
+  digitalWrite(STIR_EN, HIGH);
+    for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+      analogWrite(STIR_PWM, i);
+      delay(200);
+    }
+    delay(20000);
+  digitalWrite(STIR_EN, LOW);
+  tank.enable();
+  waste.rotate(360*WASTE_DIRECTION*WASTE_ROT_ML*WASTE_ML);
+  tank.disable();
+  
+  //pump test water in from tank
+  tank.enable();
+  tank.rotate(360*TANK_DIRECTION*TANK_PRIME*TANK_ROT_ML);
+  tank.rotate(360*TANK_DIRECTION*TANK_ML*TANK_ROT_ML);
+  tank.disable();
+
+  //enable pH sensor
+  //Serial.println("pH sensor booting");
+  //digitalWrite(PH_EN,HIGH);
+
+  //wake pH sensor and discard initial responses
+  for (int i = 1; i <= 5; i = i){
+    mySerial.print("R");
+    mySerial.print('\r');
+    if (mySerial.available() > 0) {
+      char inchar = (char)mySerial.read();
+      sensorstring += inchar;
+      if (inchar == '\r') {
+        Serial.println(sensorstring);
+        i += 1;
+        sensorstring = "";
+      }
+    }
+    delay(1000);
+  }
+
+  Serial.println("pH sensor online");
+
+  //clear out the serial buffer
+  while (mySerial.available() > 0) {
+    mySerial.read();
+    delay(5);
+  }
+
+  //begin stirring
+  digitalWrite(STIR_EN, HIGH);
+  for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+    analogWrite(STIR_PWM, i);
+    delay(200);
+  }
+
+  //wait for pH to settle
+  delay(30000);
+
+  digitalWrite(STIR_EN,LOW);
+
+  delay(30000);
+  
+  //run initial pH test
+  Serial.println("getting initial pH");
+  for (int i = 1; i <= 4; i = i){
+    mySerial.print("R");
+    mySerial.print('\r');
+    sensorstring_complete = false;
+    while (sensorstring_complete == false){
+      if (mySerial.available() > 0) {                     
+        char inchar = (char)mySerial.read(); 
+        sensorstring += inchar;
+        if (inchar == '\r') {  
+          Serial.println(sensorstring);
+          if (isdigit(sensorstring[0])){
+            pH = pH + sensorstring.toFloat();
+            sensorstring = "";
+            sensorstring_complete = true;
+            i += 1;
+          }
+        }
+      }
+    }
+    delay(1000);
+  }
+  pH = pH / 4;
+
+  //test if the starting pH value makes sense
+  if (pH < 7) {
+    Serial.println("pH is too low!");
+    tank.disable();
+    digitalWrite(STIR_EN, LOW);
+    return;
+  } else if (pH > 9) {
+    Serial.println("pH is too high!");
+    tank.disable();
+    digitalWrite(STIR_EN, LOW);
+    return;
+  }
+
+  delay(1000);
+
+  //fast titration phase
+  while(pH > 7.5){
+    oldpH = pH;
+    Serial.print("old pH: ");
+    Serial.println(oldpH);
+    mySerial.print("R");
+    mySerial.print('\r');
+    sensorstring_complete = false;
+    while (sensorstring_complete == false){
+      if (mySerial.available() > 0) {                     
+        char inchar = (char)mySerial.read(); 
+        sensorstring += inchar; 
+        if (inchar == '\r') {  
+          pH = sensorstring.toFloat();
+          Serial.print("pH reading: ");
+          Serial.println(pH);
+          sensorstring_complete = true;
+          sensorstring = "";
+        }
+      }
+    }
+
+    //add more reagent unless pH is already changing rapidly
+    if (abs(oldpH - pH) <= 0.5){
+      Serial.print("adding ");
+      Serial.print(REAGENT_ML*REAGENT_FAST_MULTIPLIER);
+      Serial.println("ml of reagent.");
+      
+      //begin stirring
+      digitalWrite(STIR_EN, HIGH);
+      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+        analogWrite(STIR_PWM, i);
+        delay(200);
+      }
+      tank.enable();
+      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_PRIME*REAGENT_ROT_ML);
+      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_ML*REAGENT_ROT_ML*REAGENT_FAST_MULTIPLIER);
+      reagent.rotate(-360*REAGENT_DIRECTION*REAGENT_PURGE*REAGENT_ROT_ML);
+      reagent_used += REAGENT_ML*REAGENT_FAST_MULTIPLIER;
+      tank.disable();
+
+      digitalWrite(STIR_EN,LOW);
+    }
+    delay(3000);
+  }
+
+  //medium titration phase
+    while(pH > 5.5){
+    oldpH = pH;
+    Serial.print("old pH: ");
+    Serial.println(oldpH);
+    mySerial.print("R");
+    mySerial.print('\r');
+    sensorstring_complete = false;
+    while (sensorstring_complete == false){
+      if (mySerial.available() > 0) {                     
+        char inchar = (char)mySerial.read(); 
+        sensorstring += inchar; 
+        if (inchar == '\r') {  
+          pH = sensorstring.toFloat();
+          Serial.print("pH reading: ");
+          Serial.println(pH);
+          sensorstring_complete = true;
+          sensorstring = "";
+        }
+      }
+    }
+    if (abs(oldpH - pH) <= 0.2){
+      Serial.print("adding ");
+      Serial.print(REAGENT_ML*REAGENT_MEDIUM_MULTIPLIER);
+      Serial.println("ml of reagent.");
+
+      //begin stirring
+      digitalWrite(STIR_EN, HIGH);
+      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+        analogWrite(STIR_PWM, i);
+        delay(200);
+      }
+
+      tank.enable();
+      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_PRIME*REAGENT_ROT_ML);
+      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_ML*REAGENT_ROT_ML*REAGENT_MEDIUM_MULTIPLIER);
+      reagent.rotate(-360*REAGENT_DIRECTION*REAGENT_PURGE*REAGENT_ROT_ML);
+      reagent_used += REAGENT_ML*REAGENT_MEDIUM_MULTIPLIER;
+      tank.disable();
+
+      digitalWrite(STIR_EN, LOW);
+    }
+    delay(3000);
+  }
+
+
+  //slow titration phase
+  while(pH > 4.2){
+    oldpH = pH;
+    Serial.print("old pH: ");
+    Serial.println(oldpH);
+    mySerial.print("R");
+    mySerial.print('\r');
+    sensorstring_complete = false;
+    while (sensorstring_complete == false){
+      if (mySerial.available() > 0) {                     
+        char inchar = (char)mySerial.read(); 
+        sensorstring += inchar; 
+        if (inchar == '\r') {  
+          pH = sensorstring.toFloat();
+          Serial.print("pH reading: ");
+          Serial.println(pH);
+          sensorstring_complete = true;
+          sensorstring = "";
+        }
+      }
+    }
+    if (abs(oldpH - pH) <= 0.05){
+      Serial.print("adding ");
+      Serial.print(REAGENT_ML);
+      Serial.println("ml of reagent.");
+
+      //begin stirring
+      digitalWrite(STIR_EN, HIGH);
+      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+        analogWrite(STIR_PWM, i);
+        delay(200);
+      }
+      
+      tank.enable();
+      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_PRIME*REAGENT_ROT_ML);
+      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_ML*REAGENT_ROT_ML);
+      reagent.rotate(-360*REAGENT_DIRECTION*REAGENT_PURGE*REAGENT_ROT_ML);
+      reagent_used += REAGENT_ML;
+      tank.disable();
+
+      digitalWrite(STIR_EN,LOW);
+    }
+    delay(3000);
+  }
+
+  //switch off the pH sensor
+  mySerial.print("SLEEP");
+  mySerial.print('\r');
+
+  //back off the lines a bit
+  tank.enable();
+  tank.rotate(-1*TANK_DIRECTION*360*2);
+  reagent.rotate(-1*REAGENT_DIRECTION*360*2);
+
+  //make sure MQTT is connected
+  reconnect();
+
+  //report result
+  KH = reagent_used * REAGENT_NORMALITY * KH_CONSTANT;
+  String KHString = String(KH);
+  char KHChar[10];
+  KHString.toCharArray(KHChar, 10);
+  client.publish(pubTopic,KHChar);  
+  Serial.println("pH of 4.2 reached!");
+  Serial.print("Reagent used: ");
+  Serial.print(reagent_used);
+  Serial.print("    Alkalinity: ");
+  Serial.println(KHString);
+
+  //clear out test chamber
+  waste.rotate(360*WASTE_DIRECTION*WASTE_ML*WASTE_ROT_ML);
+
+  //fill chamber with tank water again, stir, and empty if KEEP_WET is off
+  tank.rotate(360*TANK_DIRECTION*TANK_ML*TANK_ROT_ML);
+  tank.disable();
+  digitalWrite(STIR_EN, HIGH);
+    for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+      analogWrite(STIR_PWM, i);
+      delay(200);
+    }
+    delay(20000);
+  digitalWrite(STIR_EN, LOW);
+  if (KEEP_WET == 0){
+    tank.enable();
+    waste.rotate(360*WASTE_DIRECTION*WASTE_ROT_ML*WASTE_ML);
+    tank.disable();
+  }
+
+  //cooling fan off
+  digitalWrite(FAN_EN,LOW);
+
+}
+
+
+
+void setup_wifi(){
+  Serial.println("connecting to ");
+  Serial.print(ssid);
+  WiFi.begin(ssid,password);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("wifi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* payload, unsigned int length){
+  Serial.print("message received [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  for (int i = 0; i < length; i++) 
+  {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println(" ");
+  if ((char)payload[0] == '1') 
+  {
+    run_test();
+  }
+  else if ((char)payload[0] == '0') 
+  {
+    Serial.println("purging reaction chamber.");
+    digitalWrite(FAN_EN,HIGH);
+    analogWrite(FAN_PWM,FAN_SPEED);
+    tank.enable();
+    waste.rotate(360*WASTE_DIRECTION*WASTE_ML*WASTE_ROT_ML);
+    tank.disable();
+    digitalWrite(FAN_EN,LOW);
+  }
+  else if ((char)payload[0] == '2')
+  {
+    Serial.println("running pH test without operating pumps");
+    String sensorstring = "";
+    boolean sensor_string_complete = false;               //have we received all the data from the Atlas Scientific product
+    float pH;    
+    digitalWrite(PH_EN,HIGH);
+    mySerial.print("R");
+    mySerial.print('\r');
+    while (sensor_string_complete == false){
+      if (mySerial.available() > 0) {
+        char inchar = (char)mySerial.read();
+        sensorstring += inchar;
+        if (inchar == '\r') {
+          sensor_string_complete = true;
+        }
+      }
+
+      if (sensor_string_complete == true) {
+        Serial.println(sensorstring);
+
+        if (isdigit(sensorstring[0])) {
+          pH = sensorstring.toFloat();
+          if (pH >= 7.0) {
+            Serial.println("high");
+          }
+          if (pH <= 6.999) { 
+            Serial.println("low");
+          }
+        }
+
+      sensorstring = "";
+      }
+    }
+  }
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("KHMonitorClient")) {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      //client.publish(pubTopic,"hello world");
+      // ... and resubscribe
+      client.subscribe(subTopic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
