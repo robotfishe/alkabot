@@ -1,149 +1,200 @@
-//Alkabot monitor code version 0.9.1
-//created by Julian Burton
-//repository at github.com/robotfishe/alkalinity
-//open source under Creative Commons Attribution-NonCommercial-ShareAlike
-
 #include <Arduino.h>
 #include "wiring_private.h"
 #include "BasicStepperDriver.h"
+#include "MultiDriver.h"
+#include "SyncDriver.h"
 #include <PubSubClient.h>
 #include <WiFiNINA.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <FlashStorage.h>
+
+//delete or comment out the line below if you will only be doing manual tests using the front panel button, and will not be connecting to an MQTT server
+#define USE_MQTT
+
+#ifdef USE_MQTT
+//wifi and mqtt details - CHANGE FOR YOUR SETUP, or ignore if not using MQTT
+const char* ssid = "YOUR_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+IPAddress mqttServer(192,168,xx,xx);
+const int mqttPort = 1883;
+const char* subTopic = "KHmonitor/start";
+const char* pubTopic = "KHmonitor/data";
+#endif
+
+//set pH calibration constants
+#define PHCURVE_A -8.2442
+#define PHCURVE_B 12.362
+#define PHCURVE_C 12.048
 
 //set stepper motor constants
 #define MOTOR_STEPS 200
-#define TANK_RPM 180
-#define WASTE_RPM TANK_RPM
-#define REAGENT_RPM 80
+#define TANK_RPM 400
+#define WASTE_RPM 400
+#define REAGENT_RPM 240
 #define MICROSTEPS 8
 
 //set stepper motor wiring
-#define DIR_TANK 5
-#define STEP_TANK 2
+#define DIR_TANK 6
+#define STEP_TANK 3
 #define DIR_REAGENT 7
 #define STEP_REAGENT 4
-#define DIR_WASTE 6
-#define STEP_WASTE 3
+#define DIR_WASTE 5
+#define STEP_WASTE 2
 #define SLEEP 8
 
-//set DC and fan motor wiring
+//set DC motor wiring
 #define STIR_EN A2
 #define STIR_PWM A3
-#define FAN_EN 13
-#define FAN_PWM 9
-#define FAN_SPEED 255
+
+//set overflow sensor pin
+#define LEVEL_SENSE 9
+
+//set button pin
+#define BUTTON 13
 
 //set DC motor PWM values
 #define STIR_START 4
-#define STIR_END 18
+#define STIR_END 24
 #define STIR_STEP 2
 
 //set pH probe wiring
-#define PH_RX 12
-#define PH_TX 11
-#define PH_EN 10
+#define PH_SENSE A1
 
-//set pump speeds - YOU WILL NEED TO CALIBRATE THIS TO YOUR SETUP
-#define TANK_ROT_ML 12.1
-#define REAGENT_ROT_ML 48.8
-#define WASTE_ROT_ML TANK_ROT_ML
+//set OLED screen wiring and parameters - you may need to change the address, it is almost certainly either 0x3C or 0x3D
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
 
-//set pump directions - YOU MAY NEED TO CHANGE THESE, they can be eiter  1 or -1
-#define REAGENT_DIRECTION -1
-#define TANK_DIRECTION -1
-#define WASTE_DIRECTION 1
+//set how long (in milliseconds) to leave messages displayed on the OLED screen before putting it to sleep
+#define DISPLAY_PERIOD 1000 * 60 * 60
 
 //set amount of water to test and amount to remove after test completes - note there's no issue if waste_ml is more than needed, only if it's less
-#define TANK_ML 30.0
-#define WASTE_ML 60.0
+#define TANK_ML 70.0
+#define WASTE_ML 75.0
 
-//amount in ml to prime tank tubing, if it fills with air between runs
-#define TANK_PRIME 1.0
-
-//amount in ml to prime reagent tubing
-#define REAGENT_PRIME 0.3
-
-//amount in ml to purge backwards from reagent tubing, to prevent gravity feed effect - this should be roughly the same as REAGENT_PRIME
-#define REAGENT_PURGE 0.3
+//amount in ml to prime tubing, and to purge after test
+#define TANK_PRIME 1
+#define REAGENT_PRIME 0.1
 
 //set amount of acid to add before each pH test
 #define REAGENT_ML 0.1
 
-//this sets how much faster the reagent will be added in the first and second phases of the test, until pH reaches 7.5 and 5.5 respectively
-#define REAGENT_FAST_MULTIPLIER 3.0
-#define REAGENT_MEDIUM_MULTIPLIER 2.0
+//this sets how much faster the reagent will be added in the first and second phases of the test
+#define REAGENT_FAST_MULTIPLIER 10.0
+#define REAGENT_MEDIUM_MULTIPLIER 4.0
+#define REAGENT_FAST_THRESHOLD 5.5
+#define REAGENT_MEDIUM_THRESHOLD 4.6
 
-//normality of your acid reagent - CHANGE THIS FOR YOUR CHOSEN REAGENT
+//normality of your acid reagent - CHANGE THIS FOR YOUR CHOSEN/MIXED REAGENT
 #define REAGENT_NORMALITY 0.02
 
-//set to 1 to pull in fresh tank water after completing a test to keep the probe wet. if set to 0 it will be rinsed and then the chamber emptied
+//a sense check in the titration code will stop a test if more than this amount of reagent is used (in ml)
+#define REAGENT_SENSE_CHECK 15
+
+//set whether or not to rinse before testing - this can improve accuracy at a cost of longer test cycles and more water used
+#define RINSE 0
+
+//set to 1 to pull in fresh tank water after completing a test to keep the probe wet. if set to 0 it will be rinsed and then the chamber emptied. note most probes will degrade quickly if stored dry.
 #define KEEP_WET 1
 
 //this is the constant that relates molarity and amount of acid added to a result in dKH - only change this if you are using a type of acid other than HCl and have done your homework!
-#define KH_CONSTANT 93.318402
+#define KH_CONSTANT 2799.55
 
-//wifi and mqtt details - CHANGE FOR YOUR SETUP
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_CODE";
-IPAddress mqttServer(192,168,1,XX);
-const int mqttPort = 1883;
-const char* subTopic = "KHmonitor/start";
-const char* pubTopic = "KHmonitor/data";
+//pump speeds and directions need to be calibrated - it's a good idea to put your calculated values into the code as defaults so you don't need to redo the calibration when you reupload the code
+//calibrated values will survive a power loss but NOT a reflash of the arduino
+//directions are 1 or -1
+#define REAGENT_ROT_ML_DEFAULT 52.63
+#define TANK_ROT_ML_DEFAULT 16.13
+#define WASTE_ROT_ML_DEFAULT 13.89
+#define TANK_DIR_DEFAULT -1
+#define REAGENT_DIR_DEFAULT -1
+#define WASTE_DIR_DEFAULT -1
 
+
+//set variables and reserve flash storage for pump calibration values
+typedef struct {
+  boolean calibrated;
+  float tank_rot_ml;
+  float reagent_rot_ml;
+  float waste_rot_ml;
+  int tank_direction;
+  int reagent_direction;
+  int waste_direction;
+} Calibration;
+Calibration cal_values;
+FlashStorage(my_flash_store,Calibration);
+
+//declare variables for testing
+float pH = 0;
+float KH = 0;
+float oldpH;
+float reagent_used;
+
+#ifdef USE_MQTT
 //set up wifi and MQTT
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
 long lastMsg = 0;
 char msg[50];
+#endif
+
+//set up display
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+unsigned long display_start;
 
 //set up steppers
 BasicStepperDriver tank(MOTOR_STEPS, DIR_TANK, STEP_TANK, SLEEP);
 BasicStepperDriver reagent(MOTOR_STEPS, DIR_REAGENT, STEP_REAGENT);
 BasicStepperDriver waste(MOTOR_STEPS, DIR_WASTE, STEP_WASTE);
-
-//set up pH serial
-Uart mySerial (&sercom1, PH_RX, PH_TX, SERCOM_RX_PAD_3, UART_TX_PAD_0);
-
-//attach interrupt handler to SERCOM serial
-void SERCOM1_Handler(){
-  mySerial.IrqHandler();
-}
+SyncDriver controller(reagent,tank,waste);
 
 void setup() {
 
-  // Reassign pins to SERCOM alt
-  pinPeripheral(12, PIO_SERCOM);
-  pinPeripheral(11, PIO_SERCOM);
+  pinMode(LEVEL_SENSE,INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(LEVEL_SENSE),overflowing,LOW);
   
   pinMode(STIR_EN, OUTPUT);
   digitalWrite(STIR_EN, LOW);
   pinMode(STIR_PWM, OUTPUT);
 
-  pinMode(FAN_EN, OUTPUT);
-  digitalWrite(FAN_EN, LOW);
-  pinMode(FAN_PWM,OUTPUT);
+  pinMode(PH_SENSE,INPUT);
 
-  pinMode(PH_EN,OUTPUT);
-  digitalWrite(PH_EN,HIGH);
+  pinMode(BUTTON,INPUT_PULLUP);
   
   Serial.begin(9600);
-  mySerial.begin(9600);
 
-
-  //put pH sensor non-continuous, disable response codes, then put to sleep
-  mySerial.print("C,0");
-  mySerial.print('\r');
   delay(1000);
-  mySerial.print("RESPONSE,0");
-  mySerial.print('\r');
-  delay(1000);
-  mySerial.print("SLEEP");
-  mySerial.print('\r');
   
+  //initialise display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("SSD1306 allocation failed");
+  }
+  
+  //show initial message
+  display_text("Welcome!","",2);
 
+  //load saved calibration values
+  cal_values = my_flash_store.read();
+
+  //if no saved values, use defaults. these are probably very wrong.
+  if (cal_values.calibrated == false){
+    cal_values.tank_rot_ml = TANK_ROT_ML_DEFAULT;
+    cal_values.reagent_rot_ml = REAGENT_ROT_ML_DEFAULT;
+    cal_values.waste_rot_ml = WASTE_ROT_ML_DEFAULT;
+    cal_values.tank_direction = TANK_DIR_DEFAULT;
+    cal_values.reagent_direction = REAGENT_DIR_DEFAULT;
+    cal_values.waste_direction = WASTE_DIR_DEFAULT;
+  }
+
+  #ifdef USE_MQTT
   setup_wifi();
-
   client.setServer(mqttServer,mqttPort);
   client.setCallback(callback);
+  #endif
   
   //initialise all steppers
   tank.begin(TANK_RPM, MICROSTEPS);
@@ -152,13 +203,53 @@ void setup() {
   
   //set up active state on tank - enable pin is common to all steppers so this only needs to be done for one "master" stepper in the code
   tank.setEnableActiveState(LOW);
+
+  display.clearDisplay();
+  display.display();
 }
 
 void loop() {
+  #ifdef USE_MQTT
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
+  #endif
+
+  //run test if button is pushed
+  if(digitalRead(BUTTON)==LOW){
+    delay(10);
+    if(digitalRead(BUTTON)==LOW){
+      run_test();
+    }
+  }
+
+  //check if display timeout has been reached
+  if (millis()-display_start > DISPLAY_PERIOD){
+    display.clearDisplay();
+    display.display();
+  }
+
+  //see if we've had any serial commands
+  if (Serial.available()){
+    char inchar = char(Serial.read());
+    if (inchar == 'C' || inchar == 'c'){
+      Serial.println("Okay, entering pump calibration. You will need 10ml and 50ml graduated cylinders filled with RODI water to their top volume marks.");
+      pump_calibrate();
+    } else if (inchar == 'P' || inchar == 'p'){
+      Serial.println("Okay, entering constant pH monitor mode. Enter C in serial monitor to return to standard function.");
+      ph_comm();
+    } else if (inchar == 'W' || inchar == 'w'){
+      Serial.println("Okay, entering purge mode.");
+      tank.enable();
+      waste.rotate(360*cal_values.waste_direction*cal_values.waste_rot_ml*90);
+      purge();
+      tank.disable();
+    }
+    while (Serial.available()){
+      Serial.read();
+    }
+  }
 }
 
 void run_test() {
@@ -167,69 +258,43 @@ void run_test() {
   
   String sensorstring = "";
   bool sensorstring_complete = false;
-  float reagent_used = 0;
-  float pH = 0;
-  float KH = 0;
-  float oldpH;
-
-  //cooling fan on
-  digitalWrite(FAN_EN,HIGH);
-  analogWrite(FAN_PWM,FAN_SPEED);
+  bool sensor_operating = false;
+  reagent_used = 0;
+  pH = 0;
+  KH = 0;
 
   //if KEEP_WET is 1, drain reaction chamber
   tank.enable();
-  waste.rotate(360*WASTE_DIRECTION*WASTE_ML*WASTE_ROT_ML*KEEP_WET);
+  waste.rotate(360*cal_values.waste_direction*WASTE_ML*cal_values.waste_rot_ml*KEEP_WET);
   tank.disable();
 
-  //rinse reaction chamber
-  Serial.println("rinsing");
-  tank.enable();
-  tank.rotate(360*TANK_DIRECTION*TANK_ML*TANK_ROT_ML);
-  tank.disable();
-  digitalWrite(STIR_EN, HIGH);
-    for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
-      analogWrite(STIR_PWM, i);
-      delay(200);
-    }
-    delay(20000);
-  digitalWrite(STIR_EN, LOW);
-  tank.enable();
-  waste.rotate(360*WASTE_DIRECTION*WASTE_ROT_ML*WASTE_ML);
-  tank.disable();
-  
-  //pump test water in from tank
-  tank.enable();
-  tank.rotate(360*TANK_DIRECTION*TANK_PRIME*TANK_ROT_ML);
-  tank.rotate(360*TANK_DIRECTION*TANK_ML*TANK_ROT_ML);
-  tank.disable();
-
-  //enable pH sensor
-  //Serial.println("pH sensor booting");
-  //digitalWrite(PH_EN,HIGH);
-
-  //wake pH sensor and discard initial responses
-  for (int i = 1; i <= 5; i = i){
-    mySerial.print("R");
-    mySerial.print('\r');
-    if (mySerial.available() > 0) {
-      char inchar = (char)mySerial.read();
-      sensorstring += inchar;
-      if (inchar == '\r') {
-        Serial.println(sensorstring);
-        i += 1;
-        sensorstring = "";
+  //rinse reaction chamber if enabled
+  if (RINSE == 1){
+    Serial.println("rinsing");
+    tank.enable();
+    tank.rotate(360*cal_values.tank_direction*TANK_ML*cal_values.tank_rot_ml);
+    tank.disable();
+    digitalWrite(STIR_EN, HIGH);
+      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+        analogWrite(STIR_PWM, i);
+        delay(200);
       }
-    }
-    delay(1000);
-  }
+      delay(20000);
+    digitalWrite(STIR_EN, LOW);
+    tank.enable();
+    waste.rotate(360*cal_values.waste_direction*cal_values.waste_rot_ml*WASTE_ML);
+    tank.disable();
 
-  Serial.println("pH sensor online");
-
-  //clear out the serial buffer
-  while (mySerial.available() > 0) {
-    mySerial.read();
-    delay(5);
+    //wait ten minutes after rinsing for motors to cool
+    delay(60*1000*5);
   }
+  
+  //pump test water in from tank and prime reagent line
+  tank.enable();
+  tank.rotate(360*cal_values.tank_direction*TANK_PRIME*cal_values.tank_rot_ml);
+  tank.rotate(360*cal_values.tank_direction*TANK_ML*cal_values.tank_rot_ml);
+  reagent.rotate(360*cal_values.reagent_direction*REAGENT_PRIME*cal_values.reagent_rot_ml);
+  tank.disable();
 
   //begin stirring
   digitalWrite(STIR_EN, HIGH);
@@ -243,32 +308,10 @@ void run_test() {
 
   digitalWrite(STIR_EN,LOW);
 
-  delay(30000);
+  delay(10000);
   
   //run initial pH test
-  Serial.println("getting initial pH");
-  for (int i = 1; i <= 4; i = i){
-    mySerial.print("R");
-    mySerial.print('\r');
-    sensorstring_complete = false;
-    while (sensorstring_complete == false){
-      if (mySerial.available() > 0) {                     
-        char inchar = (char)mySerial.read(); 
-        sensorstring += inchar;
-        if (inchar == '\r') {  
-          Serial.println(sensorstring);
-          if (isdigit(sensorstring[0])){
-            pH = pH + sensorstring.toFloat();
-            sensorstring = "";
-            sensorstring_complete = true;
-            i += 1;
-          }
-        }
-      }
-    }
-    delay(1000);
-  }
-  pH = pH / 4;
+  pH = measure_pH();
 
   //test if the starting pH value makes sense
   if (pH < 7) {
@@ -285,172 +328,55 @@ void run_test() {
 
   delay(1000);
 
-  //fast titration phase
-  while(pH > 7.5){
-    oldpH = pH;
-    Serial.print("old pH: ");
-    Serial.println(oldpH);
-    mySerial.print("R");
-    mySerial.print('\r');
-    sensorstring_complete = false;
-    while (sensorstring_complete == false){
-      if (mySerial.available() > 0) {                     
-        char inchar = (char)mySerial.read(); 
-        sensorstring += inchar; 
-        if (inchar == '\r') {  
-          pH = sensorstring.toFloat();
-          Serial.print("pH reading: ");
-          Serial.println(pH);
-          sensorstring_complete = true;
-          sensorstring = "";
-        }
-      }
-    }
-
-    //add more reagent unless pH is already changing rapidly
-    if (abs(oldpH - pH) <= 0.5){
-      Serial.print("adding ");
-      Serial.print(REAGENT_ML*REAGENT_FAST_MULTIPLIER);
-      Serial.println("ml of reagent.");
-      
-      //begin stirring
-      digitalWrite(STIR_EN, HIGH);
-      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
-        analogWrite(STIR_PWM, i);
-        delay(200);
-      }
-      tank.enable();
-      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_PRIME*REAGENT_ROT_ML);
-      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_ML*REAGENT_ROT_ML*REAGENT_FAST_MULTIPLIER);
-      reagent.rotate(-360*REAGENT_DIRECTION*REAGENT_PURGE*REAGENT_ROT_ML);
-      reagent_used += REAGENT_ML*REAGENT_FAST_MULTIPLIER;
-      tank.disable();
-
-      digitalWrite(STIR_EN,LOW);
-    }
-    delay(3000);
+  while(pH > REAGENT_FAST_THRESHOLD){
+    titrate(REAGENT_FAST_MULTIPLIER);
   }
-
-  //medium titration phase
-    while(pH > 5.5){
-    oldpH = pH;
-    Serial.print("old pH: ");
-    Serial.println(oldpH);
-    mySerial.print("R");
-    mySerial.print('\r');
-    sensorstring_complete = false;
-    while (sensorstring_complete == false){
-      if (mySerial.available() > 0) {                     
-        char inchar = (char)mySerial.read(); 
-        sensorstring += inchar; 
-        if (inchar == '\r') {  
-          pH = sensorstring.toFloat();
-          Serial.print("pH reading: ");
-          Serial.println(pH);
-          sensorstring_complete = true;
-          sensorstring = "";
-        }
-      }
-    }
-    if (abs(oldpH - pH) <= 0.2){
-      Serial.print("adding ");
-      Serial.print(REAGENT_ML*REAGENT_MEDIUM_MULTIPLIER);
-      Serial.println("ml of reagent.");
-
-      //begin stirring
-      digitalWrite(STIR_EN, HIGH);
-      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
-        analogWrite(STIR_PWM, i);
-        delay(200);
-      }
-
-      tank.enable();
-      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_PRIME*REAGENT_ROT_ML);
-      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_ML*REAGENT_ROT_ML*REAGENT_MEDIUM_MULTIPLIER);
-      reagent.rotate(-360*REAGENT_DIRECTION*REAGENT_PURGE*REAGENT_ROT_ML);
-      reagent_used += REAGENT_ML*REAGENT_MEDIUM_MULTIPLIER;
-      tank.disable();
-
-      digitalWrite(STIR_EN, LOW);
-    }
-    delay(3000);
+  while(pH > REAGENT_MEDIUM_THRESHOLD){
+    titrate(REAGENT_MEDIUM_MULTIPLIER);
   }
-
-
-  //slow titration phase
-  while(pH > 4.2){
-    oldpH = pH;
-    Serial.print("old pH: ");
-    Serial.println(oldpH);
-    mySerial.print("R");
-    mySerial.print('\r');
-    sensorstring_complete = false;
-    while (sensorstring_complete == false){
-      if (mySerial.available() > 0) {                     
-        char inchar = (char)mySerial.read(); 
-        sensorstring += inchar; 
-        if (inchar == '\r') {  
-          pH = sensorstring.toFloat();
-          Serial.print("pH reading: ");
-          Serial.println(pH);
-          sensorstring_complete = true;
-          sensorstring = "";
-        }
-      }
-    }
-    if (abs(oldpH - pH) <= 0.05){
-      Serial.print("adding ");
-      Serial.print(REAGENT_ML);
-      Serial.println("ml of reagent.");
-
-      //begin stirring
-      digitalWrite(STIR_EN, HIGH);
-      for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
-        analogWrite(STIR_PWM, i);
-        delay(200);
-      }
-      
-      tank.enable();
-      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_PRIME*REAGENT_ROT_ML);
-      reagent.rotate(360*REAGENT_DIRECTION*REAGENT_ML*REAGENT_ROT_ML);
-      reagent.rotate(-360*REAGENT_DIRECTION*REAGENT_PURGE*REAGENT_ROT_ML);
-      reagent_used += REAGENT_ML;
-      tank.disable();
-
-      digitalWrite(STIR_EN,LOW);
-    }
-    delay(3000);
+  while(pH >= 4.22){
+    titrate(1);
   }
-
-  //switch off the pH sensor
-  mySerial.print("SLEEP");
-  mySerial.print('\r');
 
   //back off the lines a bit
   tank.enable();
-  tank.rotate(-1*TANK_DIRECTION*360*2);
-  reagent.rotate(-1*REAGENT_DIRECTION*360*2);
+  tank.rotate(-1*cal_values.tank_direction*360*TANK_PRIME);
+  reagent.rotate(-1*cal_values.reagent_direction*360*REAGENT_PRIME);
+
+  //if pH is way off or we got back here because of a reagent volume sense check, don't report a KH, just empty the chamber and shut down
+  if (pH<3){
+    display_text("ERROR","",3);
+    waste.rotate(360*cal_values.waste_direction*WASTE_ML*cal_values.waste_rot_ml);
+    tank.rotate(360*cal_values.tank_direction*TANK_ML*KEEP_WET*cal_values.tank_rot_ml);
+    tank.disable();
+    return;
+  }
 
   //make sure MQTT is connected
   reconnect();
 
   //report result
-  KH = reagent_used * REAGENT_NORMALITY * KH_CONSTANT;
+  KH = reagent_used * REAGENT_NORMALITY * KH_CONSTANT / TANK_ML;
   String KHString = String(KH);
   char KHChar[10];
   KHString.toCharArray(KHChar, 10);
+
+  #ifdef USE_MQTT
   client.publish(pubTopic,KHChar);  
+  #endif
+  
   Serial.println("pH of 4.2 reached!");
   Serial.print("Reagent used: ");
   Serial.print(reagent_used);
   Serial.print("    Alkalinity: ");
   Serial.println(KHString);
+  display_text("KH",KHString,3);
 
   //clear out test chamber
-  waste.rotate(360*WASTE_DIRECTION*WASTE_ML*WASTE_ROT_ML);
+  waste.rotate(360*cal_values.waste_direction*(WASTE_ML+reagent_used)*cal_values.waste_rot_ml);
 
   //fill chamber with tank water again, stir, and empty if KEEP_WET is off
-  tank.rotate(360*TANK_DIRECTION*TANK_ML*TANK_ROT_ML);
+  tank.rotate(360*cal_values.tank_direction*TANK_ML*cal_values.tank_rot_ml);
   tank.disable();
   digitalWrite(STIR_EN, HIGH);
     for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
@@ -461,17 +387,75 @@ void run_test() {
   digitalWrite(STIR_EN, LOW);
   if (KEEP_WET == 0){
     tank.enable();
-    waste.rotate(360*WASTE_DIRECTION*WASTE_ROT_ML*WASTE_ML);
+    waste.rotate(360*cal_values.waste_direction*cal_values.waste_rot_ml*WASTE_ML);
     tank.disable();
   }
 
-  //cooling fan off
-  digitalWrite(FAN_EN,LOW);
-
 }
 
+void titrate(float speedphase){
+  bool sensorstring_complete = false;
+  String sensorstring = "";
+  oldpH = pH;
+  Serial.print("old pH: ");
+  Serial.println(oldpH);
+  pH = measure_pH();
+  Serial.print("new pH: ");
+  Serial.println(pH);
+  Serial.print("difference: ");
+  Serial.println(oldpH - pH);
 
+  //if pH has reached 4.2, we're done
+  if (pH <= 4.2){
+    return;
+  }
 
+  //add more reagent unless pH is already changing rapidly or has gone up
+  float checkvalue;
+  if (speedphase > 1){
+    checkvalue = 0.2;
+  } else {
+    checkvalue = 0.05;
+  }
+  if ((0 <= oldpH - pH) && (oldpH - pH <= checkvalue)){
+    Serial.print("adding ");
+    Serial.print(REAGENT_ML*speedphase);
+    Serial.println("ml of reagent.");
+    
+    //begin stirring
+    digitalWrite(STIR_EN, HIGH);
+    for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+      analogWrite(STIR_PWM, i);
+      delay(200);
+    }
+    tank.enable();
+    reagent.rotate(360*cal_values.reagent_direction*REAGENT_ML*cal_values.reagent_rot_ml*speedphase);
+    reagent_used += REAGENT_ML*speedphase;
+    tank.disable();
+    delay(5000);
+    digitalWrite(STIR_EN,LOW);
+  } else {
+  //if we're not adding more reagent, just stir
+    digitalWrite(STIR_EN, HIGH);
+    for(int i=STIR_START; i <= STIR_END; i+= STIR_STEP){
+      analogWrite(STIR_PWM, i);
+      delay(200);
+    }
+    delay(5000);
+    digitalWrite(STIR_EN,LOW);
+  }
+  
+  delay(5000);
+  //sense check - if we've added more than our sense check volume of reagent, something's probably wrong! fake the pH to escape the loop and report the error
+  if (reagent_used > REAGENT_SENSE_CHECK){
+    pH = 1;
+    Serial.print("ERROR: more than ");
+    Serial.print(REAGENT_SENSE_CHECK);
+    Serial.println("ml of reagent used.");
+  }
+}
+
+#ifdef USE_MQTT
 void setup_wifi(){
   Serial.println("connecting to ");
   Serial.print(ssid);
@@ -502,47 +486,14 @@ void callback(char* topic, byte* payload, unsigned int length){
   else if ((char)payload[0] == '0') 
   {
     Serial.println("purging reaction chamber.");
-    digitalWrite(FAN_EN,HIGH);
-    analogWrite(FAN_PWM,FAN_SPEED);
     tank.enable();
-    waste.rotate(360*WASTE_DIRECTION*WASTE_ML*WASTE_ROT_ML);
+    waste.rotate(360*cal_values.waste_direction*WASTE_ML*cal_values.waste_rot_ml);
     tank.disable();
-    digitalWrite(FAN_EN,LOW);
   }
   else if ((char)payload[0] == '2')
   {
     Serial.println("running pH test without operating pumps");
-    String sensorstring = "";
-    boolean sensor_string_complete = false;               //have we received all the data from the Atlas Scientific product
-    float pH;    
-    digitalWrite(PH_EN,HIGH);
-    mySerial.print("R");
-    mySerial.print('\r');
-    while (sensor_string_complete == false){
-      if (mySerial.available() > 0) {
-        char inchar = (char)mySerial.read();
-        sensorstring += inchar;
-        if (inchar == '\r') {
-          sensor_string_complete = true;
-        }
-      }
-
-      if (sensor_string_complete == true) {
-        Serial.println(sensorstring);
-
-        if (isdigit(sensorstring[0])) {
-          pH = sensorstring.toFloat();
-          if (pH >= 7.0) {
-            Serial.println("high");
-          }
-          if (pH <= 6.999) { 
-            Serial.println("low");
-          }
-        }
-
-      sensorstring = "";
-      }
-    }
+    measure_pH();
   }
 }
 
@@ -566,4 +517,391 @@ void reconnect() {
     }
   }
 }
+#endif
 
+void overflowing() {
+  //check if we're actually in an overflow state
+  //delay(1000);
+  //if (digitalRead(LEVEL_SENSE)==HIGH){
+  //  return;
+  //}
+  
+  //fake pH to make sure any test in progress is stopped
+  pH = 1;
+  
+  tank.disable();
+  digitalWrite(STIR_EN,LOW);
+  Serial.println("OVERFLOW!");
+  display_text("OVERFLOW","",2);
+  tank.enable();
+  waste.rotate(360*cal_values.waste_direction*cal_values.waste_rot_ml*WASTE_ML);
+  if(digitalRead(LEVEL_SENSE)==HIGH){
+    tank.disable();
+    display_text("","",2);
+    return;
+  } else {
+    Serial.println("CANNOT RESOLVE OVERFLOW");
+    tank.disable();
+    digitalWrite(STIR_EN,LOW);
+    display_text("UNRESOLVABLE","OVERFLOW",2);
+    return;
+  }
+
+}
+
+void pump_calibrate(){
+  //run direction calibration functions
+  dir_reagent();
+  dir_tank();
+  dir_waste();
+
+  //run volume/speed calibration functions
+  cal_reagent();
+  cal_tank();
+  cal_waste();
+
+  //set calibrated flag and store calibration values in flash storage
+  cal_values.calibrated = true;
+  my_flash_store.write(cal_values);
+
+  Serial.println("Pump calibration complete! Purging water from reaction chamber.");
+  purge();
+  tank.disable();
+}
+
+void dir_reagent() {
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  Serial.println("Running reagent pump for 3 rotations. Pump should run TOWARDS reaction chamber.");
+  tank.enable();
+  reagent.rotate(360*3);
+  Serial.println("Enter R to reverse reagent pump direction or any other letter to keep it as is.");
+  while(!Serial.available()){
+    delay(10);
+  }
+  char inchar = char(Serial.read());
+  if (inchar == 'R' || inchar == 'r'){
+    Serial.println("Okay, switching pump direction..");
+    cal_values.reagent_direction = -1;
+  } else {
+    Serial.println("Okay, pump direction confirmed.");
+    cal_values.reagent_direction = 1;
+  }
+  Serial.println(" ");
+  while(Serial.available()){
+    Serial.read();
+  }
+}
+
+void dir_tank() {
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  Serial.println("Running tank pump for 3 rotations. Pump should run TOWARDS reaction chamber.");
+  tank.rotate(360*3);
+  Serial.println("Enter R to reverse tank pump direction or any other letter to keep it as is.");
+  while(!Serial.available()){
+    delay(10);
+  }
+  char inchar = char(Serial.read());
+  if (inchar == 'R' || inchar == 'r'){
+    Serial.println("Okay, switching pump direction.");
+    cal_values.tank_direction = -1;
+  } else {
+    Serial.println("Okay, pump direction confirmed.");
+    cal_values.tank_direction  = 1;
+  }
+  Serial.println(" ");
+  while(Serial.available()){
+    Serial.read();
+  }
+}
+
+void dir_waste() {
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  Serial.println("Running waste pump for 3 rotations. Pump should run AWAY FROM reaction chamber.");
+  waste.rotate(360*3);
+  Serial.println("Enter R to reverse waste pump direction or any other letter to keep it as is.");
+  while(!Serial.available()){
+    delay(10);
+  }
+  char inchar = char(Serial.read());
+  if (inchar == 'R' || inchar == 'r'){
+    Serial.println("Okay, switching pump direction.");
+    cal_values.waste_direction = -1;
+  } else {
+    Serial.println("Okay, pump direction confirmed.");
+    cal_values.waste_direction = 1;
+  }
+  Serial.println(" ");
+  while(Serial.available()){
+    Serial.read();
+  }
+}
+
+void purge(){
+  bool lineEmpty = false;
+  while(Serial.available()){
+    Serial.read();
+  }
+  waste.rotate(360*cal_values.waste_direction*160);
+  while (lineEmpty == false){
+    Serial.println("Is the waste tube empty of water? If not, enter W to run the waste pump for 80 rotations. Otherwise, enter any other letter to continue.");
+    while(!Serial.available()){
+      delay(10);
+    }
+    char inchar = char(Serial.read());
+    if (inchar == 'W' || inchar == 'w'){
+      Serial.println("Okay, running waste pump for another 80 rotations.");
+      waste.rotate(cal_values.waste_direction*360*80);
+    } else {
+      Serial.println("Okay, continuing operation.");
+      lineEmpty = true;
+    }
+    while(Serial.available()){
+      Serial.read();
+    }
+  }
+}
+
+void cal_reagent(){
+  bool serial_string_complete = false;
+  String serialstring = "";
+  
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  Serial.println(" ");
+  Serial.println("We'll calibrate the reagent speed first. Place the reagent tubing in the 10ml graduated cylinder (careful it doesn't overflow!) and the waste tubing in an empty receptable, and enter any letter when ready.");
+  while(!Serial.available()){
+    delay(10);
+  }
+  Serial.println("The reagent pump will run for 500 rotations.");
+  reagent.rotate(cal_values.reagent_direction*360*500);
+  
+  Serial.println("Enter the volume drawn from the graduated cylinder.");
+
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  while (serial_string_complete == false){
+    if (Serial.available() > 0) { 
+      char inchar = (char)Serial.read(); 
+      serialstring += inchar;   
+      if (inchar == '\r') {     
+        serial_string_complete = true;
+      }
+    }
+  }
+
+  cal_values.reagent_rot_ml=500.0/serialstring.toFloat();
+
+  Serial.print("reagent_rot_ml value is ");
+  Serial.print(cal_values.reagent_rot_ml);
+  Serial.println(". You may want to record this somewhere.");
+  
+  while(Serial.available()){
+    Serial.read();
+  }
+}
+
+void cal_tank(){
+  bool serial_string_complete = false;
+  String serialstring = "";
+  
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  Serial.println(" ");
+  Serial.println("Tank pump speed is next. Place the tank tubing in the 50ml graduated cylinder.");
+  Serial.println("Enter any letter when ready.");
+  while(!Serial.available()){
+    delay(10);
+  }
+  Serial.println("The tank pump will run for 500 rotations.");
+  tank.rotate(cal_values.tank_direction*360*500);
+
+  Serial.println("Enter the volume drawn from the graduated cylinder.");
+
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  while (serial_string_complete == false){
+    if (Serial.available() > 0) { 
+      char inchar = (char)Serial.read(); 
+      serialstring += inchar;   
+      if (inchar == '\r') {     
+        serial_string_complete = true;
+      }
+    }
+  }
+
+  cal_values.tank_rot_ml=500/serialstring.toFloat();
+
+  Serial.print("tank_rot_ml value is ");
+  Serial.print(cal_values.tank_rot_ml);
+  Serial.println(". You may want to record this somewhere.");
+
+  while(Serial.available()){
+    Serial.read();
+  }
+}
+
+void cal_waste(){
+  bool serial_string_complete = false;
+  String serialstring = "";
+  
+  Serial.println(" ");
+  Serial.println("Last is waste pump speed. Place waste tubing in an empty 50ml graduated cylinder.");
+  Serial.println("Enter any letter when ready.");
+  while(!Serial.available()){
+    delay(10);
+  }
+  Serial.println("The waste pump will run for 500 rotations.");
+  waste.rotate(cal_values.waste_direction*360*500);
+
+  Serial.println("Enter the volume collected in the graduated cylinder.");
+  
+  while(Serial.available()){
+    Serial.read();
+  }
+  
+  while (serial_string_complete == false){
+    if (Serial.available() > 0) { 
+      char inchar = (char)Serial.read(); 
+      serialstring += inchar;   
+      if (inchar == '\r') {     
+        serial_string_complete = true;
+      }
+    }
+  }
+
+  cal_values.waste_rot_ml=500/serialstring.toFloat();
+
+  Serial.print("waste_rot_ml value is ");
+  Serial.print(cal_values.waste_rot_ml);
+  Serial.println(". You may want to record this somewhere.");
+
+  while(Serial.available()){
+    Serial.read();
+  }
+}
+
+void ph_comm(){
+  boolean inComm = true;
+  String inputstring = "";
+
+  while (inComm == true){
+    measure_pH();
+    delay(1000);
+
+    if (Serial.available()){
+      inputstring = Serial.readStringUntil(13);           //read the string until we see a <CR>
+      Serial.println(inputstring);
+    }
+
+    if (inputstring == "c" | inputstring == "C"){
+
+      inComm = false;
+      return;
+    }
+  }
+}
+
+void display_text(String line1, String line2, int font_size){
+  display.clearDisplay();
+
+  display.setTextSize(font_size);             // Draw 2X-scale text
+  display.setTextColor(SSD1306_WHITE);
+
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  if (line2!=""){
+    display.getTextBounds(line1, 0, 0, &x1, &y1, &w, &h); //calc width of new string
+    display.setCursor((SCREEN_WIDTH-w+4)/2, SCREEN_HEIGHT*1/4-h/2);
+    display.print(line1);
+    display.getTextBounds(line2, 0, 0, &x1, &y1, &w, &h); //calc width of new string
+    display.setCursor((SCREEN_WIDTH-w+4)/2, SCREEN_HEIGHT*3/4-h/2);
+    display.print(line2);
+  } else {
+    display.getTextBounds(line1, 0, 0, &x1, &y1, &w, &h); //calc width of new string
+    display.setCursor((SCREEN_WIDTH-w+4)/2, SCREEN_HEIGHT*1/2-h/2);
+    display.print(line1);
+  }
+  display.display();
+  display_start = millis();
+}
+
+float measure_pH(){
+  long samplingTime = 0;
+  int samplingInterval = 20;
+  float pHValue;
+  float voltage;
+  int ArrayLength = 100;
+  int pHArrayIndex = 0;
+  int pHArray[ArrayLength];
+  while (pHArrayIndex < ArrayLength){
+    if (millis() - samplingTime > samplingInterval) {
+      pHArray[pHArrayIndex++] = analogRead(PH_SENSE);
+      samplingTime = millis();
+    }
+  }
+  voltage = avergearray(pHArray, ArrayLength) * 3.3 / 1024;
+  //pHValue = KVALUE * voltage + OFFSET;
+  pHValue = (PHCURVE_A * voltage * voltage) + (PHCURVE_B * voltage) + PHCURVE_C;
+  Serial.print("Voltage:");
+  Serial.print(voltage, 2);
+  Serial.print("    pH value: ");
+  Serial.println(pHValue, 2);
+  return pHValue;
+}
+double avergearray(int* arr, int number) {
+  int i;
+  int max, min;
+  double avg;
+  long amount = 0;
+  if (number <= 0) {
+    Serial.println("Error number for the array to avraging!/n");
+    return 0;
+  }
+  if (number < 5) { //less than 5, calculated directly statistics
+    for (i = 0; i < number; i++) {
+      amount += arr[i];
+    }
+    avg = amount / number;
+    return avg;
+  } else {
+    if (arr[0] < arr[1]) {
+      min = arr[0]; max = arr[1];
+    }
+    else {
+      min = arr[1]; max = arr[0];
+    }
+    for (i = 2; i < number; i++) {
+      if (arr[i] < min) {
+        amount += min;      //arr<min
+        min = arr[i];
+      } else {
+        if (arr[i] > max) {
+          amount += max;  //arr>max
+          max = arr[i];
+        } else {
+          amount += arr[i]; //min<=arr<=max
+        }
+      }//if
+    }//for
+    avg = (double)amount / (number - 2);
+  }//if
+  return avg;
+}
