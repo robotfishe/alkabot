@@ -8,7 +8,7 @@ The Alkabot is an open-source alkalinity monitor for reef aquaria, designed for 
 
 <P><b>Major updates to version 1.1:</b></P>
 <ul>
-<li>Reagent reservoir is no longer incorporated into the device - use your own container. This improves flexibility in installation and allows for larger reservoirs and less frequent top-ups. It also means you don't need to worry about watertightness on any of the joints between the acrylic panels during assembly. While I still suggest solvent-weld adhesive, this *might* mean you can get away with superglue.</li>
+<li>Reagent reservoir is no longer incorporated into the device - use your own container. This improves flexibility in installation and allows for larger reservoirs and less frequent top-ups. It also means you don't need to worry about watertightness on any of the joints between the acrylic panels during assembly.</li>
 <li>Size of the device is reduced by about 20%, mostly in height. The biggest benefit here is that the case can now be cut from a single 600x300mm sheet of acrylic.</li>
 <li>The code is now designed to work with an analog pH sensor board, which are significantly cheaper than the digital board previously advised.</li>
 <li>Reaction chamber volume increased by 85%, allowing more water to be used for more accurate tests.</li>
